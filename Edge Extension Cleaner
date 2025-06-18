@@ -1,0 +1,172 @@
+# Silent Edge Extension Cleaner - No output, no logging
+# Removes extensions and cleans all browser store records silently
+
+# Close Edge processes
+try {
+    Stop-Process -Name "msedge" -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name "msedgewebview2" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+} catch { }
+
+# Define target extension IDs
+$targetExtensionIds = @(
+    "ikdddppdhmjcdfgilpnbkdeggoiicjgo",
+    "jlhmfgmfgeifomenelglieieghnjghma"
+)
+
+# Get all user profiles
+$userFolders = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { 
+    $_.Name -ne "Public" -and $_.Name -ne "Default" -and $_.Name -ne "Default User" 
+}
+
+foreach ($userFolder in $userFolders) {
+    $edgeProfilesPath = Join-Path -Path $userFolder.FullName -ChildPath "AppData\Local\Microsoft\Edge\User Data"
+    
+    if (-not (Test-Path $edgeProfilesPath)) { continue }
+    
+    # Get all profiles
+    $profiles = Get-ChildItem -Path $edgeProfilesPath -Directory -ErrorAction SilentlyContinue | Where-Object { 
+        $_.Name -eq "Default" -or $_.Name -like "Profile*" 
+    }
+    
+    foreach ($profile in $profiles) {
+        # Remove extension folders
+        $extensionsPath = Join-Path -Path $profile.FullName -ChildPath "Extensions"
+        if (Test-Path $extensionsPath) {
+            foreach ($extId in $targetExtensionIds) {
+                $extPath = Join-Path -Path $extensionsPath -ChildPath $extId
+                if (Test-Path $extPath) {
+                    try {
+                        Remove-Item -Path $extPath -Recurse -Force -ErrorAction SilentlyContinue
+                    } catch { }
+                }
+            }
+        }
+        
+        # Clean Preferences file
+        $preferencesPath = Join-Path -Path $profile.FullName -ChildPath "Preferences"
+        if (Test-Path $preferencesPath) {
+            try {
+                $preferencesContent = Get-Content $preferencesPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                $preferences = $preferencesContent | ConvertFrom-Json
+                
+                $modified = $false
+                
+                # Remove from extensions.settings
+                if ($preferences.extensions -and $preferences.extensions.settings) {
+                    foreach ($extId in $targetExtensionIds) {
+                        if ($preferences.extensions.settings.$extId) {
+                            $preferences.extensions.settings.PSObject.Properties.Remove($extId)
+                            $modified = $true
+                        }
+                    }
+                }
+                
+                # Remove from Chrome Web Store signatures
+                if ($preferences.extensions -and $preferences.extensions.install_signature -and $preferences.extensions.install_signature.ids) {
+                    $originalIds = $preferences.extensions.install_signature.ids
+                    $filteredIds = @($originalIds | Where-Object { $_ -notin $targetExtensionIds })
+                    if ($filteredIds.Count -ne $originalIds.Count) {
+                        $preferences.extensions.install_signature.ids = $filteredIds
+                        $modified = $true
+                    }
+                }
+                
+                # Remove from Microsoft Edge Add-ons store signatures
+                if ($preferences.extensions -and $preferences.extensions.microsoft_install_signature -and $preferences.extensions.microsoft_install_signature.ids) {
+                    $originalIds = $preferences.extensions.microsoft_install_signature.ids
+                    $filteredIds = @($originalIds | Where-Object { $_ -notin $targetExtensionIds })
+                    if ($filteredIds.Count -ne $originalIds.Count) {
+                        $preferences.extensions.microsoft_install_signature.ids = $filteredIds
+                        $modified = $true
+                    }
+                }
+                
+                # Remove from invalid_ids in both signatures
+                if ($preferences.extensions -and $preferences.extensions.install_signature -and $preferences.extensions.install_signature.invalid_ids) {
+                    $originalInvalidIds = $preferences.extensions.install_signature.invalid_ids
+                    $filteredInvalidIds = @($originalInvalidIds | Where-Object { $_ -notin $targetExtensionIds })
+                    if ($filteredInvalidIds.Count -ne $originalInvalidIds.Count) {
+                        $preferences.extensions.install_signature.invalid_ids = $filteredInvalidIds
+                        $modified = $true
+                    }
+                }
+                
+                if ($preferences.extensions -and $preferences.extensions.microsoft_install_signature -and $preferences.extensions.microsoft_install_signature.invalid_ids) {
+                    $originalInvalidIds = $preferences.extensions.microsoft_install_signature.invalid_ids
+                    $filteredInvalidIds = @($originalInvalidIds | Where-Object { $_ -notin $targetExtensionIds })
+                    if ($filteredInvalidIds.Count -ne $originalInvalidIds.Count) {
+                        $preferences.extensions.microsoft_install_signature.invalid_ids = $filteredInvalidIds
+                        $modified = $true
+                    }
+                }
+                
+                # Remove from pinned_extensions
+                if ($preferences.extensions -and $preferences.extensions.pinned_extensions) {
+                    $originalPinned = $preferences.extensions.pinned_extensions
+                    $filteredPinned = @($originalPinned | Where-Object { $_ -notin $targetExtensionIds })
+                    if ($filteredPinned.Count -ne $originalPinned.Count) {
+                        $preferences.extensions.pinned_extensions = $filteredPinned
+                        $modified = $true
+                    }
+                }
+                
+                # Remove from known_disabled
+                if ($preferences.extensions -and $preferences.extensions.known_disabled) {
+                    $originalDisabled = $preferences.extensions.known_disabled
+                    $filteredDisabled = @($originalDisabled | Where-Object { $_ -notin $targetExtensionIds })
+                    if ($filteredDisabled.Count -ne $originalDisabled.Count) {
+                        $preferences.extensions.known_disabled = $filteredDisabled
+                        $modified = $true
+                    }
+                }
+                
+                # Remove from chrome_url_overrides
+                if ($preferences.extensions -and $preferences.extensions.chrome_url_overrides) {
+                    $urlOverrides = $preferences.extensions.chrome_url_overrides
+                    $urlOverrideProps = $urlOverrides.PSObject.Properties.Name
+                    
+                    foreach ($prop in $urlOverrideProps) {
+                        if ($urlOverrides.$prop -and $urlOverrides.$prop.extension_id -in $targetExtensionIds) {
+                            $urlOverrides.PSObject.Properties.Remove($prop)
+                            $modified = $true
+                        }
+                    }
+                }
+                
+                # Save modified preferences
+                if ($modified) {
+                    $modifiedContent = $preferences | ConvertTo-Json -Depth 20 -Compress
+                    Set-Content -Path $preferencesPath -Value $modifiedContent -Encoding UTF8 -ErrorAction SilentlyContinue
+                }
+                
+            } catch { }
+        }
+        
+        # Clean Secure Preferences file
+        $securePreferencesPath = Join-Path -Path $profile.FullName -ChildPath "Secure Preferences"
+        if (Test-Path $securePreferencesPath) {
+            try {
+                $secureContent = Get-Content $securePreferencesPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                $securePrefs = $secureContent | ConvertFrom-Json
+                
+                $secureModified = $false
+                
+                if ($securePrefs.extensions -and $securePrefs.extensions.settings) {
+                    foreach ($extId in $targetExtensionIds) {
+                        if ($securePrefs.extensions.settings.$extId) {
+                            $securePrefs.extensions.settings.PSObject.Properties.Remove($extId)
+                            $secureModified = $true
+                        }
+                    }
+                }
+                
+                if ($secureModified) {
+                    $modifiedSecureContent = $securePrefs | ConvertTo-Json -Depth 20 -Compress
+                    Set-Content -Path $securePreferencesPath -Value $modifiedSecureContent -Encoding UTF8 -ErrorAction SilentlyContinue
+                }
+                
+            } catch { }
+        }
+    }
+}
